@@ -41,7 +41,7 @@ function calculate_directory_schedule($dir)
     closedir($handle);
 }
 
-function encrypt_directory($dir, $new_dir)
+function encrypt_directory($dir, $new_dir, $expire)
 {
     global $nfiles, $finish;
 
@@ -66,13 +66,19 @@ function encrypt_directory($dir, $new_dir)
                 mkdir($new_path, 0777);
             }
 
-            encrypt_directory($path, $new_path);
+            encrypt_directory($path, $new_path, $expire);
 
         } else {
             $infos = explode('.', $file);
 
             if (strtolower($infos[count($infos)-1]) == 'php') {
-                if (!beast_encode_file($path, $new_path)) {
+                if (!empty($expire)) {
+                    $result = beast_encode_file($path, $new_path, $expire);
+                } else {
+                    $result = beast_encode_file($path, $new_path);
+                }
+
+                if (!$result) {
                     echo "Failed to encode file `{$path}'\n";
                 }
 
@@ -100,6 +106,7 @@ if (!$conf) {
 
 $src_path = trim($conf['src_path']);
 $dst_path = trim($conf['dst_path']);
+$expire   = trim($conf['expire']);
 
 if (empty($src_path) || !is_dir($src_path)) {
     exit("Fatal: source path `{$src_path}' not exists\n\n");
@@ -109,10 +116,20 @@ if (empty($dst_path) || (!is_dir($dst_path) && !mkdir($dst_path, 0777))) {
     exit("Fatal: can not create directory `{$dst_path}'\n\n");
 }
 
+printf("Source code path: %s\n", $src_path);
+printf("Destination code path: %s\n", $dst_path);
+printf("Expire time: %s\n", $expire);
+printf("------------- start process -------------\n");
+
+$expire_time = 0;
+if ($expire) {
+    $expire_time = strtotime($expire);
+}
+
 $time = microtime(TRUE);
 
 calculate_directory_schedule($src_path);
-encrypt_directory($src_path, $dst_path);
+encrypt_directory($src_path, $dst_path, $expire_time);
 
 $used = microtime(TRUE) - $time;
 

@@ -92,6 +92,7 @@ zend_function_entry beast_functions[] = {
     PHP_FE(beast_avail_cache,      NULL)
     PHP_FE(beast_cache_info,       NULL)
     PHP_FE(beast_support_filesize, NULL)
+    PHP_FE(beast_file_expire,      NULL)
     {NULL, NULL, NULL}    /* Must be the last line in beast_functions[] */
 };
 /* }}} */
@@ -290,8 +291,8 @@ int encrypt_file(const char *inputfile,
 
     php_stream_write(output_stream,
         encrypt_file_header_sign, encrypt_file_header_length);
-    php_stream_write(output_stream, &dumplen, INT_SIZE);
-    php_stream_write(output_stream, &expireval, INT_SIZE);
+    php_stream_write(output_stream, (const char *)&dumplen, INT_SIZE);
+    php_stream_write(output_stream, (const char *)&expireval, INT_SIZE);
 
     if (ops->encrypt(inbuf, inlen, &outbuf, &outlen) == -1) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR,
@@ -660,8 +661,8 @@ int set_nonblock(int fd)
 {
     int flags;
 
-    if ((flags = fcntl(fd, F_GETFL, 0)) == -1 ||
-        fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1)
+    if ((flags = fcntl(fd, F_GETFL, 0)) == -1
+        || fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1)
     {
         return -1;
     }
@@ -671,10 +672,26 @@ int set_nonblock(int fd)
 
 void segmentfault_deadlock_fix(int sig)
 {
-    beast_write_log(beast_log_error,
-                    "Segment fault and fix deadlock");
+    void *array[10] = {0};
+    size_t size;
+    char **info = NULL;
+    int i;
+
+    size = backtrace(array, 10);
+    info = backtrace_symbols(array, (int)size);
+
+    beast_write_log(beast_log_error, "Segmentation fault and fix deadlock");
+
+    if (info) {
+        for (i = 0; i < size; i++) {
+            beast_write_log(beast_log_error, info[i]);
+        }
+        free(info);
+    }
+
     beast_mm_unlock();     /* Maybe lock mm so free here */
     beast_cache_unlock();  /* Maybe lock cache so free here */
+
     exit(sig);
 }
 
@@ -722,7 +739,7 @@ int validate_networkcard()
             return 0;
         }
 
-        fgets(buf, 128, fp);
+        (void)fgets(buf, 128, fp);
 
         for (curr = buf, last = NULL; *curr; curr++) {
             if (*curr != '\n') {
@@ -789,8 +806,9 @@ PHP_MINIT_FUNCTION(beast)
     }
 
     while (1) {
-        if (write(fds[1], "", 1) != 1)
+        if (write(fds[1], "", 1) != 1) {
             break;
+        }
         beast_max_filesize++;
     }
 
@@ -888,19 +906,70 @@ PHP_MINFO_FUNCTION(beast)
 /* }}} */
 
 
+PHP_FUNCTION(beast_file_expire)
+{
+    char *file;
+    int file_len;
+    char header[HEADER_MAX_SIZE] = {0};
+    int header_len;
+    signed long expire = 0;
+    int fd = -1;
+    char *string;
+    char *format = "Y-m-d H:i:s";
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s",
+                              &file, &file_len TSRMLS_CC) == FAILURE)
+    {
+        RETURN_FALSE;
+    }
+
+    fd = open(file, O_RDONLY);
+    if (fd < 0) {
+        goto error;
+    }
+
+    header_len = encrypt_file_header_length + INT_SIZE * 2;
+
+    if (read(fd, header, header_len) != header_len
+        || memcmp(header, encrypt_file_header_sign, encrypt_file_header_length))
+    {
+        goto error;
+    }
+
+    close(fd);
+
+    expire = *((int *)&header[encrypt_file_header_length + INT_SIZE]);
+
+    if (little_endian()) {
+        expire = swab32(expire);
+    }
+
+    if (expire > 0) {
+        string = php_format_date(format, strlen(format), expire, 1 TSRMLS_CC);
+        RETURN_STRING(string, 0);
+    } else {
+        RETURN_STRING("0000-00-00 00:00:00", 1);
+    }
+
+error:
+    if (fd >= 0) {
+        close(fd);
+    }
+    RETURN_FALSE;
+}
+
+
 PHP_FUNCTION(beast_encode_file)
 {
     char *input, *output;
     char *itmp, *otmp;
     int input_len, output_len;
-    char *expire_datetime = NULL;
-    int expire_datetime_len = 0;
-    signed long expire = 0;
+    long expire = 0;
     int retval;
 
-    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "ss|s",
-            &input, &input_len, &output, &output_len, &expire_datetime,
-            &expire_datetime_len TSRMLS_CC) == FAILURE)
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "ss|l",
+            &input, &input_len, &output, &output_len,
+            &expire TSRMLS_CC) == FAILURE)
     {
         RETURN_FALSE;
     }
@@ -919,15 +988,7 @@ PHP_FUNCTION(beast_encode_file)
     memcpy(otmp, output, output_len);
     otmp[output_len] = 0;
 
-    if (expire_datetime) {
-        int now;
-        expire = php_parse_date(expire_datetime, &now);
-        if (expire < 0) {
-            expire = 0;
-        }
-    }
-
-    retval = encrypt_file(itmp, otmp, expire TSRMLS_CC);
+    retval = encrypt_file(itmp, otmp, (int)expire TSRMLS_CC);
 
     free(itmp);
     free(otmp);
@@ -972,4 +1033,3 @@ PHP_FUNCTION(beast_support_filesize)
  * vim600: noet sw=4 ts=4 fdm=marker
  * vim<600: noet sw=4 ts=4
  */
-
